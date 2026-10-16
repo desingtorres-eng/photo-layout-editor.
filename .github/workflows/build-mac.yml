@@ -1,0 +1,43 @@
+name: Compilar app para Mac
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Apple-Silicon (M1/M2/M3/M4)
+            target: aarch64-apple-darwin
+          - name: Intel
+            target: x86_64-apple-darwin
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Instalar dependencias
+        run: npm install
+
+      - name: Generar iconos
+        run: npx tauri icon src-tauri/app-icon.png
+
+      - name: Compilar
+        run: npx tauri build --target ${{ matrix.target }} --bundles dmg
+
+      - name: Subir instalador
+        uses: actions/upload-artifact@v4
+        with:
+          name: EditorImpresion-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
