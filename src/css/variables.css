@@ -1,0 +1,40 @@
+:root {
+  /* Fondo base: negro-azulado profundo, como el "Liquid Glass" de iOS/macOS */
+  --bg-main: #0d0e12;
+  --bg-workspace-glow: rgba(255, 255, 255, 0.045);
+
+  /* Vidrio: dos intensidades, paneles exteriores más sutiles que las tarjetas */
+  --glass-1: rgba(255, 255, 255, 0.045);
+  --glass-2: rgba(255, 255, 255, 0.075);
+  --glass-field: rgba(0, 0, 0, 0.30);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --glass-border-strong: rgba(255, 255, 255, 0.20);
+  --glass-highlight: rgba(255, 255, 255, 0.18);
+  --blur-strength: blur(34px) saturate(180%);
+
+  /* Texto */
+  --text-main: #f5f5f7;
+  --text-muted: #9a9aa2;
+  --text-soft: #7c7c84;
+
+  /* Acentos vivos, como los toggles/botones de iOS */
+  --accent: #0a84ff;
+  --accent-hover: #3d9dff;
+  --accent-active: #0068d1;
+  --accent-soft: rgba(10, 132, 255, 0.24);
+  --danger: #ff453a;
+  --danger-soft: rgba(255, 69, 58, 0.24);
+  --success: #34c759;
+
+  --radius-sm: 12px;
+  --radius: 16px;
+  --radius-lg: 22px;
+  --radius-xl: 28px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.3), 0 14px 34px rgba(0, 0, 0, 0.5);
+  --shadow-floating: 0 24px 60px rgba(0, 0, 0, 0.6), 0 6px 16px rgba(0, 0, 0, 0.4);
+
+  --font-main: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+}

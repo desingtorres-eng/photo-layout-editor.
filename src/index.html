@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Editor de Impresión</title>
+
+  <link rel="stylesheet" href="css/variables.css">
+  <link rel="stylesheet" href="css/layout.css">
+  <link rel="stylesheet" href="css/controls.css">
+</head>
+<body>
+
+  <div class="app">
+
+    <!-- PANEL IZQUIERDO -->
+    <aside class="panel">
+      <h1>Impresión</h1>
+
+      <!-- HOJA -->
+      <fieldset class="control-group">
+        <legend>Hoja</legend>
+        <label>Tamaño de hoja</label>
+        <select id="paperSize">
+          <option value="22x32">22x32 cm</option>
+          <option value="32x45">32x45 cm</option>
+          <option value="32x48">32x48 cm</option>
+          <option value="a4">A4</option>
+          <option value="a3">A3</option>
+          <option value="letter">Carta</option>
+          <option value="custom">Personalizado</option>
+        </select>
+
+        <div id="customSizeInputs" style="display:none; margin-top:8px; grid-column:1/-1;">
+          <label>Ancho (cm)</label>
+          <input type="text" inputmode="decimal" id="customWidth" value="21">
+          <label>Alto (cm)</label>
+          <input type="text" inputmode="decimal" id="customHeight" value="29.7">
+        </div>
+
+        <label>Orientación</label>
+        <select id="orientation">
+          <option value="portrait">Vertical</option>
+          <option value="landscape">Horizontal</option>
+        </select>
+      </fieldset>
+
+      <!-- IMÁGENES -->
+      <fieldset class="control-group">
+        <legend>Imágenes</legend>
+        <label>Ancho imagen (cm)</label>
+        <input type="text" inputmode="decimal" id="imgWidth" value="5">
+
+        <label>Alto imagen (cm)</label>
+        <input type="text" inputmode="decimal" id="imgHeight" value="5">
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="lockRatio" checked>
+          Mantener proporción
+        </label>
+      </fieldset>
+
+      <!-- BORDE -->
+      <fieldset class="control-group">
+        <legend>Borde</legend>
+        <label class="checkbox-row">
+          <input type="checkbox" id="showBorder">
+          Mostrar borde en fotos
+        </label>
+      </fieldset>
+
+      <!-- ESPACIADO -->
+      <fieldset class="control-group">
+        <legend>Espaciado</legend>
+        <label>Margen exterior (cm)</label>
+        <div class="number-stepper">
+          <input type="text" inputmode="decimal" id="margin" value="0.5">
+          <div class="stepper-arrows">
+            <button type="button" class="stepper-btn" data-target="margin" data-dir="up" aria-label="Aumentar margen">▲</button>
+            <button type="button" class="stepper-btn" data-target="margin" data-dir="down" aria-label="Disminuir margen">▼</button>
+          </div>
+        </div>
+
+        <label>Espacio entre imágenes (cm)</label>
+        <div class="number-stepper">
+          <input type="text" inputmode="decimal" id="gap" value="0.03">
+          <div class="stepper-arrows">
+            <button type="button" class="stepper-btn" data-target="gap" data-dir="up" aria-label="Aumentar espacio">▲</button>
+            <button type="button" class="stepper-btn" data-target="gap" data-dir="down" aria-label="Disminuir espacio">▼</button>
+          </div>
+        </div>
+      </fieldset>
+
+      <!-- ACCIONES -->
+      <div class="control-group">
+        <button class="secondary" id="exportBtn">Exportar</button>
+        <button class="secondary" id="printBtn" title="Abre el PDF en Vista Previa para imprimir">Imprimir</button>
+        <button class="secondary" id="clearBtn" title="Limpiar todo y recargar">Limpiar todo</button>
+
+        <input
+          type="file"
+          id="imageInput"
+          accept="image/*"
+          multiple
+          hidden
+        >
+      </div>
+    </aside>
+
+    <!-- CANVAS CENTRAL -->
+    <main class="workspace">
+      <div class="canvas-wrapper">
+        <div class="canvas-inner">
+          <canvas id="printCanvas"></canvas>
+        </div>
+      </div>
+
+      <!-- CONTROLES DE ZOOM: fijos sobre el workspace (no forman parte del
+           canvas-wrapper), así que siempre quedan accesibles sin importar
+           cuánto zoom tenga la hoja o hacia dónde se haya paneado. -->
+      <div class="zoom-controls" id="zoomControls">
+        <button id="zoomOutBtn" title="Alejar">−</button>
+        <button id="zoomResetBtn" title="Ajustar a pantalla">Ajustar</button>
+        <button id="zoomInBtn" title="Acercar">+</button>
+      </div>
+    </main>
+
+    <!-- RESIZER -->
+    <div id="rightResizer" class="panel-resizer"></div>
+
+    <!-- PANEL DERECHO: THUMBNAILS -->
+    <aside class="panel" id="rightPanel">
+      <h2 style="margin-top:0; font-size:15px;">Imágenes</h2>
+
+      <button id="openPreImportBtn" class="button">
+        Agregar imágenes
+      </button>
+
+      <div id="thumbnails"></div>
+
+      <div class="edit-hint">
+        Clic → seleccionar<br>
+        Doble clic → editar (mover, escalar, rotar)
+      </div>
+    </aside>
+
+    <!-- MODAL PRE-IMPORTAR -->
+    <div id="preImportPanel" class="overlay hidden">
+      <div class="pre-import-modal">
+      <div class="pre-import-top">
+          <div class="pre-import-size-group">
+            <div class="pre-import-field">
+              <label for="preWidth">Ancho (cm)</label>
+              <input type="text" inputmode="decimal" id="preWidth" value="5">
+            </div>
+            <div class="pre-import-field">
+              <label for="preHeight">Alto (cm)</label>
+              <input type="text" inputmode="decimal" id="preHeight" value="5">
+            </div>
+          </div>
+          <label class="checkbox-row pre-import-lock">
+            <input type="checkbox" id="preLockRatio" checked>
+            &nbsp;Mantener proporción
+          </label>
+        </div>
+
+        <div id="preImportDropzone" class="pre-import-dropzone">
+          <div class="dropzone-content">
+            <span class="icon">🖼️</span>
+            <p>Agregar imágenes</p>
+            <small>Haz clic para seleccionar archivos</small>
+          </div>
+        </div>
+
+        <div class="pre-import-info" id="preImportInfo">
+          No has agregado imágenes
+        </div>
+
+        <div id="preImportPreview" class="pre-import-preview"></div>
+
+        <div class="pre-import-actions">
+          <button id="cancelImportBtn">Cancelar</button>
+          <button id="confirmImportBtn">Aceptar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="vendor/jspdf.umd.min.js"></script>
+  <script src="js/tauri-bridge.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/zoom.js"></script>
+  <script>initApp();</script>
+</body>
+</html>

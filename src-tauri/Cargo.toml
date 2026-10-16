@@ -1,0 +1,17 @@
+[package]
+name = "editor-impresion"
+version = "1.0.0"
+description = "Editor de distribución e impresión de fotos"
+edition = "2021"
+
+[lib]
+name = "editor_impresion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
