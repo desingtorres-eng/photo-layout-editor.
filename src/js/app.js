@@ -319,6 +319,151 @@ function idbClearImages() {
   }));
 }
 
+// ================== ORIGINALES EN ALTA CALIDAD ==================
+// Para que la app sea fluida con muchas fotos pesadas, en pantalla se trabaja
+// con una copia liviana de cada foto (la "vista previa", que es la que va en
+// state.images[].src / imgObject). La foto ORIGINAL se guarda aparte, como Blob,
+// en IndexedDB (clave "full:<id>") y solo se vuelve a leer al exportar el PDF,
+// de a una foto por vez para no llenar la memoria.
+const FULL_PREFIX = 'full:';
+const fullBlobs = new Map(); // id -> Blob (original)
+
+function idbSetKey(key, value) {
+  return openImagesDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+function idbGetKey(key) {
+  return openImagesDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  }));
+}
+function idbDeleteKey(key) {
+  return openImagesDB().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  }));
+}
+function forgetFullImage(id) {
+  fullBlobs.delete(id);
+  idbDeleteKey(FULL_PREFIX + id).catch(() => {});
+}
+
+// Lado largo de la vista previa: 2x el marco más grande (para poder hacer zoom
+// a la foto sin que se pixele en pantalla), entre 1000 y 2400 px.
+const PREVIEW_MIN = 1000, PREVIEW_MAX = 2400;
+function previewLongSide() {
+  const wCm = Math.max(parseLocaleNumber(preWidthInput.value) || 0, state.image.widthCm || 0);
+  const hCm = Math.max(parseLocaleNumber(preHeightInput.value) || 0, state.image.heightCm || 0);
+  const framePx = Math.max(cmToPx(wCm), cmToPx(hCm));
+  return Math.max(PREVIEW_MIN, Math.min(PREVIEW_MAX, Math.round(framePx * 2)));
+}
+
+function dataUrlToBlob(dataUrl) {
+  return fetch(dataUrl).then(r => r.blob());
+}
+
+// Dado { src, imgObject } de la foto completa, devuelve la vista previa liviana
+// y (si la foto era más grande) el Blob del original. Si la foto ya es chica,
+// se usa tal cual y no hace falta guardar un original aparte.
+function fileToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('No se pudo leer el archivo'));
+    r.readAsDataURL(blob);
+  });
+}
+
+// Lee la foto para importarla. En navegadores que ya corrigen el EXIF solos se
+// decodifica directo desde el archivo (rápido, sin pasar por base64); si no, se
+// usa la ruta anterior que corrige la orientación a mano.
+async function loadForImport(file) {
+  if (await browserHandlesExifItself()) {
+    const url = URL.createObjectURL(file);
+    try {
+      const imgObject = await new Promise((resolve, reject) => {
+        const im = new Image();
+        im.onload = () => resolve(im);
+        im.onerror = () => reject(new Error('No se pudo leer la imagen'));
+        im.src = url;
+      });
+      return { src: null, imgObject, blob: file };
+    } finally { URL.revokeObjectURL(url); }
+  }
+  const full = await loadNormalizedImage(file);
+  return { src: full.src, imgObject: full.imgObject, blob: null };
+}
+
+async function buildPreview(full, mime) {
+  const w = full.imgObject.naturalWidth || full.imgObject.width;
+  const h = full.imgObject.naturalHeight || full.imgObject.height;
+  const k = Math.min(1, previewLongSide() / Math.max(w, h));
+  if (k >= 1) {
+    // Foto chica: se usa tal cual, no hace falta guardar un original aparte.
+    const src = full.src || await fileToDataURL(full.blob);
+    return { src, imgObject: full.imgObject, fullBlob: null };
+  }
+
+  const cw = Math.max(1, Math.round(w * k)), ch = Math.max(1, Math.round(h * k));
+  const c = document.createElement('canvas');
+  c.width = cw; c.height = ch;
+  const cx = c.getContext('2d');
+  cx.imageSmoothingEnabled = true;
+  cx.imageSmoothingQuality = 'high';
+  cx.drawImage(full.imgObject, 0, 0, cw, ch);
+  const src = mime === 'image/png' ? c.toDataURL('image/png') : c.toDataURL('image/jpeg', 0.88);
+  c.width = c.height = 0;
+  const imgObject = await new Promise((resolve, reject) => {
+    const im = new Image();
+    im.onload = () => resolve(im);
+    im.onerror = () => reject(new Error('No se pudo generar la vista previa'));
+    im.src = src;
+  });
+  const fullBlob = full.blob || await dataUrlToBlob(full.src);
+  return { src, imgObject, fullBlob };
+}
+
+// Lee un original (Blob) como imagen. Se usa solo al exportar.
+function loadFullImage(id) {
+  return (async () => {
+    let blob = fullBlobs.get(id);
+    if (!blob) { try { blob = await idbGetKey(FULL_PREFIX + id); } catch (e) { blob = null; } }
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    return new Promise((resolve) => {
+      const im = new Image();
+      im.onload = () => { URL.revokeObjectURL(url); resolve(im); };
+      im.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      im.src = url;
+    });
+  })();
+}
+
+// Estado del procesamiento de fotos al importar (una por una, con progreso).
+let importChain = Promise.resolve();
+let importEpoch = 0;   // sube cada vez que se cierra el panel: descarta lo que quedó a medias
+let importTotal = 0, importDone = 0;
+function updateImportStatus() {
+  const pending = importTotal - importDone;
+  confirmImportBtn.disabled = pending > 0 || state.importQueue.length === 0;
+  if (pending > 0) {
+    preImportInfo.textContent = `Procesando fotos... ${importDone} de ${importTotal}`;
+  } else if (state.importQueue.length > 0) {
+    preImportInfo.textContent = `${state.importQueue.length} imagen(es) lista(s) para importar`;
+  } else {
+    preImportInfo.textContent = 'No has agregado imagenes';
+  }
+}
+
 function saveState() {
   try {
     const stateToSave = { page: state.page, image: state.image };
@@ -326,7 +471,7 @@ function saveState() {
   } catch (e) { console.error('Error al guardar configuración:', e); }
 
   const imagesToSave = state.images.map(img => ({
-    id: img.id, src: img.src, name: img.name,
+    id: img.id, src: img.src, name: img.name, hasFull: !!img.hasFull,
     widthCm: img.widthCm, heightCm: img.heightCm,
     imageRotation: img.imageRotation,
     hasManualRotation: !!img.hasManualRotation,
@@ -372,7 +517,7 @@ function clearState() {
   try {
     localStorage.removeItem(STORAGE_KEY);
     idbClearImages().catch(e => console.error('Error al limpiar imágenes guardadas:', e));
-    state.images = []; state.pages = [];
+    state.images = []; state.pages = []; fullBlobs.clear();
     state.selectedImageId = null; state.editMode = false;
     if (typeof resetView === 'function') resetView();
     drawAll(); updateThumbnails(); adjustCanvasScale();
@@ -436,6 +581,7 @@ function openPreImportPanel() {
 }
 function closePreImportPanel() {
   preImportPanel.classList.add('hidden');
+  importEpoch++; importTotal = 0; importDone = 0;
   state.importQueue = []; preImportInfo.textContent = '';
   preImportPreview.innerHTML = ''; imageInput.value = "";
 }
@@ -452,8 +598,14 @@ confirmImportBtn.addEventListener('click', () => {
   lockRatioCheckbox.checked = preLockRatioInput.checked;
   state.importQueue.forEach(item => { state.files.push(item); });
   state.importQueue.forEach(item => {
+    const newId = generateId();
+    if (item.fullBlob) {
+      fullBlobs.set(newId, item.fullBlob);
+      idbSetKey(FULL_PREFIX + newId, item.fullBlob)
+        .catch(e => console.error('No se pudo guardar el original (se mantiene en memoria):', e));
+    }
     state.images.push({
-      id: generateId(), src: item.src, name: item.name, imgObject: item.imgObject,
+      id: newId, src: item.src, name: item.name, imgObject: item.imgObject, hasFull: !!item.fullBlob,
       // La orientación de la FOTO dentro del marco la decide el motor de acomodo
       // (chooseBestPhotoRotation) para maximizar el área visible. El usuario puede
       // sobreescribirla después con el handle de giro (hasManualRotation = true).
@@ -879,6 +1031,7 @@ function updateThumbnails() {
       e.stopPropagation();
       snapshotState();
       state.images.splice(i, 1);
+      forgetFullImage(file.id);
       if (state.selectedImageId === file.id) { state.selectedImageId = null; state.editMode = false; }
       drawAll(); updateThumbnails(); saveState();
     };
@@ -1253,23 +1406,58 @@ canvas.addEventListener('mousemove', (e) => {
 });
 
 // ================== CARGA IMAGENES ==================
+// Procesa un lote de archivos con hasta 3 fotos a la vez (no las 50 juntas: cada
+// foto grande decodificada ocupa decenas de MB). El resultado se agrega a la cola
+// SIEMPRE en el mismo orden en que se eligieron los archivos.
+const IMPORT_CONCURRENCY = 3;
+async function processImportBatch(files, epoch) {
+  const results = new Array(files.length).fill(null);
+  const done = new Array(files.length).fill(false);
+  let nextToStart = 0, nextToFlush = 0;
+
+  const flush = () => {
+    while (nextToFlush < files.length && done[nextToFlush]) {
+      const r = results[nextToFlush];
+      if (r) {
+        state.importQueue.push(r);
+        const preview = document.createElement('img');
+        preview.src = r.src;
+        preview.style.cssText = 'height:60px; border-radius:4px; object-fit:cover;';
+        preImportPreview.appendChild(preview);
+      }
+      nextToFlush++;
+    }
+  };
+
+  const worker = async () => {
+    while (epoch === importEpoch) {
+      const i = nextToStart++;
+      if (i >= files.length) return;
+      const file = files[i];
+      try {
+        const full = await loadForImport(file);
+        const prev = await buildPreview(full, file.type);
+        results[i] = { src: prev.src, name: file.name, imgObject: prev.imgObject, fullBlob: prev.fullBlob };
+      } catch (err) {
+        console.error('Error al procesar imagen:', err);
+        if (epoch === importEpoch) alert(`No se pudo cargar "${file.name}": ${err.message}`);
+      }
+      done[i] = true;
+      if (epoch === importEpoch) { importDone++; flush(); updateImportStatus(); }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(IMPORT_CONCURRENCY, files.length) }, worker));
+}
+
 imageInput.addEventListener("change", e => {
   const files = Array.from(e.target.files || []);
-  files.forEach(file => {
-    loadNormalizedImage(file).then(({ src, imgObject }) => {
-      state.importQueue.push({ src, name: file.name, imgObject });
-      confirmImportBtn.disabled = false;
-      preImportInfo.textContent = `${state.importQueue.length} imagen(es) lista(s) para importar`;
-      const preview = document.createElement('img');
-      preview.src = src;
-      preview.style.cssText = 'height:60px; border-radius:4px; object-fit:cover;';
-      preImportPreview.appendChild(preview);
-    }).catch(err => {
-      console.error('Error al procesar imagen:', err);
-      alert(`No se pudo cargar "${file.name}": ${err.message}`);
-    });
-  });
   e.target.value = "";
+  if (!files.length) return;
+  const epoch = importEpoch;
+  importTotal += files.length;
+  updateImportStatus();
+  importChain = importChain.then(() => processImportBatch(files, epoch));
 });
 openPreImportBtn.addEventListener('click', openPreImportPanel);
 
@@ -1398,6 +1586,7 @@ const printBtn = document.getElementById("printBtn");
 
 // Genera el PDF con todas las hojas. `btn` muestra el progreso.
 async function buildPdf(btn) {
+  const missingFull = new Set();
   const { jsPDF } = window.jspdf;
   const pdf = new jsPDF({
     orientation: state.page.widthCm > state.page.heightCm ? 'landscape' : 'portrait',
@@ -1430,13 +1619,23 @@ async function buildPdf(btn) {
     tempCtx.scale(dpiScale, dpiScale);
     tempCtx.fillStyle = '#fff';
     tempCtx.fillRect(0, 0, cmToPx(state.page.widthCm), cmToPx(state.page.heightCm));
-    state.pages[index].forEach(item => drawImageItem(tempCtx, item, 0, 0));
+    for (const item of state.pages[index]) {
+      // Se usa el ORIGINAL en alta calidad (una foto a la vez); si por algún motivo
+      // no está disponible, se cae a la vista previa y se avisa al final.
+      const fullImg = await loadFullImage(item.id);
+      if (!fullImg) {
+        const meta = state.images.find(i => i.id === item.id);
+        if (meta && meta.hasFull) missingFull.add(item.id);
+      }
+      drawImageItem(tempCtx, fullImg ? { ...item, img: fullImg } : item, 0, 0);
+    }
     const b64 = await canvasToBase64(tempCanvas);
     if (index > 0) pdf.addPage();
     pdf.addImage({ imageData: b64, format: 'JPEG', x: 0, y: 0,
                    width: state.page.widthCm, height: state.page.heightCm });
     await new Promise(r => setTimeout(r, 20));
   }
+  pdf._missingFull = missingFull.size;
   return pdf;
 }
 
@@ -1448,6 +1647,7 @@ async function runExportAction(btn, label, action) {
     if (printBtn) printBtn.disabled = true;
     const pdf = await buildPdf(btn);
     await action(pdf);
+    if (pdf._missingFull > 0) alert(`Aviso: ${pdf._missingFull} foto(s) se exportaron en calidad reducida porque no se encontró el original guardado. Vuelve a importarlas si necesitas máxima calidad.`);
   } catch (error) {
     console.error('Error al exportar:', error);
     alert('Error al exportar PDF: ' + (error && error.message ? error.message : error));
