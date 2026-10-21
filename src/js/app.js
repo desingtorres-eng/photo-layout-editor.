@@ -32,7 +32,16 @@ if (!canvas || !ctx) console.error("No se pudo obtener el canvas o su contexto 2
 
 let baseScale = 1;
 
-function generateId() { return crypto.randomUUID(); }
+function generateId() {
+  // crypto.randomUUID solo existe en Safari 15.4+; fallback para macOS Big Sur (Safari 14)
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    var r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
 
 // ================== STATE ==================
 const state = {
