@@ -31,6 +31,15 @@ preImportDropzone.addEventListener('click', () => { imageInput.click(); });
 if (!canvas || !ctx) console.error("No se pudo obtener el canvas o su contexto 2D");
 
 let baseScale = 1;
+// Resolución interna del canvas de pantalla respecto al espacio lógico (300 DPI).
+// 1 = sin cambios. Baja cuando hay varias hojas para que el canvas no se vuelva gigante
+// (2 hojas 22x32 = ~20 MP, 4 hojas = ~40 MP) y se ponga lento en Macs viejos.
+let previewScale = 1;
+const MAX_PREVIEW_PIXELS = 10000000; // ~10 MP: una hoja 22x32 a 300 DPI queda igual
+function computePreviewScale(logicalW, logicalH) {
+  const px = logicalW * logicalH;
+  return px <= MAX_PREVIEW_PIXELS ? 1 : Math.sqrt(MAX_PREVIEW_PIXELS / px);
+}
 
 function generateId() {
   // crypto.randomUUID solo existe en Safari 15.4+; fallback para macOS Big Sur (Safari 14)
@@ -967,16 +976,24 @@ function renderCanvas() {
   const rows = Math.max(1, Math.ceil(state.pages.length / cols));
 
   if (state.pages.length === 0) {
-    canvas.width = pageWidth; canvas.height = pageHeight;
-    ctx.fillStyle = "#2a2a2a"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    previewScale = computePreviewScale(pageWidth, pageHeight);
+    canvas.width = Math.round(pageWidth * previewScale);
+    canvas.height = Math.round(pageHeight * previewScale);
+    ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
+    ctx.fillStyle = "#2a2a2a"; ctx.fillRect(0, 0, pageWidth, pageHeight);
     ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, pageWidth, pageHeight);
     adjustCanvasScale(); return;
   }
 
-  canvas.width = cols * (pageWidth + pageGap) - pageGap;
-  canvas.height = rows * (pageHeight + pageGap) - pageGap;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#2a2a2a"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const logicalW = cols * (pageWidth + pageGap) - pageGap;
+  const logicalH = rows * (pageHeight + pageGap) - pageGap;
+  previewScale = computePreviewScale(logicalW, logicalH);
+  canvas.width = Math.round(logicalW * previewScale);
+  canvas.height = Math.round(logicalH * previewScale);
+  // Todo el dibujo sigue en coordenadas lógicas (300 DPI); el transform lo reduce.
+  ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
+  ctx.clearRect(0, 0, logicalW, logicalH);
+  ctx.fillStyle = "#2a2a2a"; ctx.fillRect(0, 0, logicalW, logicalH);
 
   state.pages.forEach((page, index) => {
     const col = index % cols, row = Math.floor(index / cols);
@@ -1204,7 +1221,8 @@ function hitTestHandles(canvasX, canvasY) {
 function screenToCanvas(screenX, screenY) {
   const rect = canvas.getBoundingClientRect();
   const scaleTotal = baseScale * (typeof zoom !== 'undefined' ? zoom : 1);
-  return { x: (screenX - rect.left) / scaleTotal, y: (screenY - rect.top) / scaleTotal };
+  // scaleTotal va en píxeles del canvas interno; se divide por previewScale para volver al espacio lógico
+  return { x: (screenX - rect.left) / scaleTotal / previewScale, y: (screenY - rect.top) / scaleTotal / previewScale };
 }
 
 // ================== HANDLE DRAG ==================
