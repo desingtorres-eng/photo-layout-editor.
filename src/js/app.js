@@ -71,29 +71,25 @@ let isUndoing = false;
 
 function snapshotState() {
   if (isUndoing) return;
-  const snap = {
+  // Copia superficial: las fotos (src base64 / imgObject) se comparten por referencia,
+  // no se copian. Antes se hacía JSON.stringify de todo, incluidos los base64 de todas
+  // las fotos, en cada cambio (y se guardaban hasta 30 copias): muy lento y con mucha RAM.
+  undoHistory.push({
     page: { ...state.page },
     image: { ...state.image },
     images: state.images.map(img => ({ ...img }))
-  };
-  undoHistory.push(JSON.stringify(snap));
+  });
   if (undoHistory.length > MAX_HISTORY) undoHistory.shift();
 }
 
 function undoLastChange() {
   if (undoHistory.length === 0) return;
   isUndoing = true;
-  const snapStr = undoHistory.pop();
+  const snap = undoHistory.pop();
   try {
-    const snap = JSON.parse(snapStr);
     state.page = snap.page;
     state.image = snap.image;
-    // Restore images preserving imgObject references
-    const restoredImages = snap.images.map(snapImg => {
-      const existing = state.images.find(i => i.id === snapImg.id);
-      return { ...snapImg, imgObject: existing ? existing.imgObject : null };
-    }).filter(i => i.imgObject);
-    state.images = restoredImages;
+    state.images = snap.images.filter(i => i.imgObject);
     state.selectedImageId = null;
     state.editMode = false;
     updateUI();
@@ -488,6 +484,15 @@ function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
   } catch (e) { console.error('Error al guardar configuración:', e); }
 
+  clearTimeout(idbSaveTimer);
+  idbSaveTimer = setTimeout(flushImagesToIdb, 600);
+}
+
+// Guardar todas las fotos (base64) en IndexedDB es caro; se agrupa para no hacerlo
+// en cada cambio sino una vez que el usuario deja de tocar cosas.
+let idbSaveTimer = null;
+function flushImagesToIdb() {
+  clearTimeout(idbSaveTimer);
   const imagesToSave = state.images.map(img => ({
     id: img.id, src: img.src, name: img.name, hasFull: !!img.hasFull,
     widthCm: img.widthCm, heightCm: img.heightCm,
@@ -501,6 +506,8 @@ function saveState() {
   }));
   idbSetImages(imagesToSave).catch(e => console.error('Error al guardar imágenes (IndexedDB):', e));
 }
+document.addEventListener('visibilitychange', () => { if (document.hidden && idbSaveTimer) flushImagesToIdb(); });
+window.addEventListener('pagehide', () => { if (idbSaveTimer) flushImagesToIdb(); });
 
 function loadState() {
   let hasConfig = false;
@@ -516,13 +523,18 @@ function loadState() {
 
   idbGetImages().then(savedImages => {
     if (!savedImages || !savedImages.length) { updateUI(); drawAll(); updateThumbnails(); return; }
-    const imagePromises = savedImages.map(imgData => new Promise((resolve) => {
+    // Se respeta el orden guardado (antes quedaban en el orden en que terminaba de cargar cada una).
+    const loaded = new Array(savedImages.length).fill(null);
+    const imagePromises = savedImages.map((imgData, idx) => new Promise((resolve) => {
       const img = new Image();
       img.src = imgData.src;
-      img.onload = () => { state.images.push({ ...imgData, imgObject: img }); resolve(); };
+      img.onload = () => { loaded[idx] = { ...imgData, imgObject: img }; resolve(); };
       img.onerror = () => resolve();
     }));
-    Promise.all(imagePromises).then(() => { updateUI(); drawAll(); updateThumbnails(); });
+    Promise.all(imagePromises).then(() => {
+      loaded.forEach(item => { if (item) state.images.push(item); });
+      updateUI(); drawAll(); updateThumbnails();
+    });
   }).catch(e => {
     console.error('Error al cargar imágenes (IndexedDB):', e);
     updateUI(); drawAll(); updateThumbnails();
@@ -561,8 +573,6 @@ function adjustCanvasScale() {
 }
 
 function setupCanvas(resetZoom = false) {
-  canvas.width = cmToPx(state.page.widthCm);
-  canvas.height = cmToPx(state.page.heightCm);
   if (resetZoom && typeof resetView === 'function') resetView();
   drawAll(); adjustCanvasScale();
 }
@@ -614,7 +624,6 @@ confirmImportBtn.addEventListener('click', () => {
   document.getElementById('imgWidth').value = width;
   document.getElementById('imgHeight').value = height;
   lockRatioCheckbox.checked = preLockRatioInput.checked;
-  state.importQueue.forEach(item => { state.files.push(item); });
   state.importQueue.forEach(item => {
     const newId = generateId();
     if (item.fullBlob) {
@@ -968,6 +977,27 @@ function computeLayout() {
 // Solo dibuja lo que ya está calculado en state.pages — no vuelve a correr el acomodo.
 // Esto es lo que se usa en cada frame mientras se arrastra/gira/hace zoom a una imagen,
 // para que se sienta fluido en vez de recalcular el bin-packing 60 veces por segundo.
+// Ajusta el canvas de pantalla. Asignar canvas.width/height BORRA y reasigna toda la
+// memoria del canvas (carísimo con 10-40 MP), así que solo se hace si el tamaño cambió.
+function sizeCanvas(logicalW, logicalH) {
+  previewScale = computePreviewScale(logicalW, logicalH);
+  const w = Math.max(1, Math.round(logicalW * previewScale));
+  const h = Math.max(1, Math.round(logicalH * previewScale));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Todo el dibujo sigue en coordenadas lógicas (300 DPI); el transform lo reduce.
+  ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
+}
+
+// Redibuja como máximo una vez por frame (mover el mouse dispara muchísimos eventos).
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderCanvas(); });
+}
+
 function renderCanvas() {
   const pageWidth = cmToPx(state.page.widthCm);
   const pageHeight = cmToPx(state.page.heightCm);
@@ -976,10 +1006,7 @@ function renderCanvas() {
   const rows = Math.max(1, Math.ceil(state.pages.length / cols));
 
   if (state.pages.length === 0) {
-    previewScale = computePreviewScale(pageWidth, pageHeight);
-    canvas.width = Math.round(pageWidth * previewScale);
-    canvas.height = Math.round(pageHeight * previewScale);
-    ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
+    sizeCanvas(pageWidth, pageHeight);
     ctx.fillStyle = "#2a2a2a"; ctx.fillRect(0, 0, pageWidth, pageHeight);
     ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, pageWidth, pageHeight);
     adjustCanvasScale(); return;
@@ -987,12 +1014,7 @@ function renderCanvas() {
 
   const logicalW = cols * (pageWidth + pageGap) - pageGap;
   const logicalH = rows * (pageHeight + pageGap) - pageGap;
-  previewScale = computePreviewScale(logicalW, logicalH);
-  canvas.width = Math.round(logicalW * previewScale);
-  canvas.height = Math.round(logicalH * previewScale);
-  // Todo el dibujo sigue en coordenadas lógicas (300 DPI); el transform lo reduce.
-  ctx.setTransform(previewScale, 0, 0, previewScale, 0, 0);
-  ctx.clearRect(0, 0, logicalW, logicalH);
+  sizeCanvas(logicalW, logicalH);
   ctx.fillStyle = "#2a2a2a"; ctx.fillRect(0, 0, logicalW, logicalH);
 
   state.pages.forEach((page, index) => {
@@ -1039,6 +1061,31 @@ function syncItemIntoPages(imgId) {
 }
 
 // ================== THUMBNAILS (2 por fila) ==================
+// Miniatura chica (240 px) de cada foto, calculada una sola vez. Antes cada miniatura
+// usaba el base64 completo de la foto (hasta 2400 px) y se re-decodificaba al hacer
+// cualquier clic.
+const thumbCache = new WeakMap();
+function getThumbSrc(item) {
+  const obj = item.imgObject;
+  if (!obj) return item.src;
+  const cached = thumbCache.get(obj);
+  if (cached) return cached;
+  let t;
+  try {
+    const w = obj.naturalWidth || obj.width, h = obj.naturalHeight || obj.height;
+    const k = Math.min(1, 240 / Math.max(w, h));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+    const cx = c.getContext('2d');
+    cx.fillStyle = '#fff'; cx.fillRect(0, 0, c.width, c.height);
+    cx.drawImage(obj, 0, 0, c.width, c.height);
+    t = c.toDataURL('image/jpeg', 0.75);
+    c.width = c.height = 0;
+  } catch (e) { t = item.src; }
+  thumbCache.set(obj, t);
+  return t;
+}
+
 function updateThumbnails() {
   thumbnailsContainer.innerHTML = '';
   state.images.forEach((file, i) => {
@@ -1047,7 +1094,7 @@ function updateThumbnails() {
     if (state.selectedImageId === file.id) thumb.classList.add('selected');
 
     const img = document.createElement('img');
-    img.src = file.src;
+    img.src = getThumbSrc(file);
     thumb.appendChild(img);
 
     const delBtn = document.createElement('button');
@@ -1069,7 +1116,7 @@ function updateThumbnails() {
       } else {
         state.selectedImageId = file.id; state.editMode = false;
       }
-      updateThumbnails(); updateEditPanel(); drawAll();
+      updateThumbnails(); updateEditPanel(); renderCanvas();
     });
 
     thumbnailsContainer.appendChild(thumb);
@@ -1236,7 +1283,7 @@ canvas.addEventListener('dblclick', (e) => {
   if (hit) {
     state.selectedImageId = hit.item.id;
     state.editMode = true;
-    updateThumbnails(); updateEditPanel(); drawAll();
+    updateThumbnails(); updateEditPanel(); renderCanvas();
   }
 });
 
@@ -1272,17 +1319,17 @@ canvas.addEventListener('mousedown', (e) => {
       if (!clickedItem || clickedItem.item.id !== state.selectedImageId) {
         state.editMode = false;
         state.selectedImageId = clickedItem ? clickedItem.item.id : null;
-        updateThumbnails(); updateEditPanel(); drawAll(); return;
+        updateThumbnails(); updateEditPanel(); renderCanvas(); return;
       }
     }
   } else {
     const hit = hitTestCanvas(pos.x, pos.y);
     if (hit) {
       state.selectedImageId = hit.item.id;
-      updateThumbnails(); updateEditPanel(); drawAll();
+      updateThumbnails(); updateEditPanel(); renderCanvas();
     } else {
       state.selectedImageId = null; state.editMode = false;
-      updateThumbnails(); updateEditPanel(); drawAll();
+      updateThumbnails(); updateEditPanel(); renderCanvas();
     }
   }
 });
@@ -1376,7 +1423,7 @@ document.addEventListener('mousemove', (e) => {
   // girar y hacer zoom no cambian el tamaño ni la posición del recuadro en la página),
   // solo se sincroniza el dato en vivo y se vuelve a dibujar.
   syncItemIntoPages(img.id);
-  renderCanvas();
+  scheduleRender();
 });
 
 document.addEventListener('mouseup', () => {
@@ -1406,7 +1453,7 @@ canvas.addEventListener('wheel', (e) => {
   // Camino rápido (igual que en el arrastre): el zoom de la foto no cambia el acomodo
   // de la hoja, así que no hace falta recalcularlo en cada "scroll" de la rueda.
   syncItemIntoPages(image.id);
-  renderCanvas();
+  scheduleRender();
   // saveState() escribe TODAS las imágenes (con su base64 completo) en
   // IndexedDB — hacerlo en cada tick de la rueda (varias veces por segundo
   // mientras se hace zoom) es lo que volvía lento el scroll con varias fotos
@@ -1448,7 +1495,7 @@ async function processImportBatch(files, epoch) {
       if (r) {
         state.importQueue.push(r);
         const preview = document.createElement('img');
-        preview.src = r.src;
+        preview.src = getThumbSrc(r);
         preview.style.cssText = 'height:60px; border-radius:4px; object-fit:cover;';
         preImportPreview.appendChild(preview);
       }
@@ -1657,6 +1704,7 @@ async function buildPdf(btn) {
       drawImageItem(tempCtx, fullImg ? { ...item, img: fullImg } : item, 0, 0);
     }
     const b64 = await canvasToBase64(tempCanvas);
+    tempCanvas.width = tempCanvas.height = 0; // libera la memoria de la hoja ya exportada
     if (index > 0) pdf.addPage();
     pdf.addImage({ imageData: b64, format: 'JPEG', x: 0, y: 0,
                    width: state.page.widthCm, height: state.page.heightCm });
